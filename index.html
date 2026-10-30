@@ -169,8 +169,16 @@ async function loadModel() {
     runningMode: "VIDEO", numHands: 2,
     minHandDetectionConfidence: 0.5, minHandPresenceConfidence: 0.5, minTrackingConfidence: 0.5,
   });
-  try { return await HandLandmarker.createFromOptions(files, opts("GPU")); }
-  catch { return await HandLandmarker.createFromOptions(files, opts("CPU")); }
+  // CPU first: the GPU path can hang silently on some Android phones
+  try { return await withTimeout(HandLandmarker.createFromOptions(files, opts("CPU")), 45000, 'model'); }
+  catch (e) {
+    if (e && e.message === 'timeout:model') throw e;
+    return await withTimeout(HandLandmarker.createFromOptions(files, opts("GPU")), 30000, 'model');
+  }
+}
+
+function withTimeout(p, ms, tag) {
+  return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout:' + tag)), ms))]);
 }
 
 async function startCamera() {
@@ -188,17 +196,28 @@ startBtn.addEventListener('click', async () => {
   startBtn.textContent = 'लोड हो रहा है…';
   try {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('nocam');
-    const [lm] = await Promise.all([loadModel(), startCamera()]);
-    landmarker = lm;
+    // 1. camera first, so the user sees themselves while the model loads
+    await withTimeout(startCamera(), 15000, 'camera');
     document.getElementById('intro').hidden = true;
+    setStatus('हैंड-ट्रैकिंग मॉडल लोड हो रहा है…');
+    // 2. then the model
+    landmarker = await loadModel();
+    setStatus('');
     requestAnimationFrame(loop);
   } catch (e) {
+    console.error(e);
+    document.getElementById('intro').hidden = false;
+    setStatus('');
     startBtn.disabled = false;
     startBtn.textContent = 'फिर से कोशिश करें · Try again';
     introNote.classList.add('err');
-    introNote.textContent = (e && (e.name === 'NotAllowedError'))
-      ? 'कैमरा की अनुमति नहीं मिली। ब्राउज़र सेटिंग्स में कैमरा अनुमति दें और फिर से कोशिश करें।'
-      : 'कैमरा या मॉडल शुरू नहीं हो सका। पेज को https लिंक से खोलें और इंटरनेट कनेक्शन जांचें।';
+    const msg = String(e && (e.message || e.name) || e);
+    introNote.textContent =
+      (e && e.name === 'NotAllowedError') ? 'कैमरा की अनुमति नहीं मिली। ब्राउज़र सेटिंग्स में कैमरा अनुमति दें और फिर से कोशिश करें।'
+      : msg === 'nocam' ? 'यह ब्राउज़र कैमरा नहीं खोल सकता। पेज को Chrome में https लिंक से खोलें।'
+      : msg === 'timeout:camera' ? 'कैमरा शुरू नहीं हुआ। दूसरे ऐप में कैमरा बंद करें और पेज रीलोड करें।'
+      : msg === 'timeout:model' ? 'मॉडल लोड होने में बहुत समय लगा। Wi-Fi से जुड़कर पेज रीलोड करें।'
+      : 'शुरू नहीं हो सका (' + msg.slice(0, 80) + ')। पेज रीलोड करके फिर कोशिश करें।';
   }
 });
 
